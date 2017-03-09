@@ -1,0 +1,102 @@
+representation:
+survey_metadata (surveyid, surveycreationdate, userfirstname, userlastname, surveyname, surveyownerid, surveyexpirationdate)
+question (Questionid, QuestionText, QuestionDescription, ForceResponse, questionType )
+type: mc, text, slider
+choice (questionid, choiceid, description)
+mcq: (choose 1)
+q1: 2 (choice) desc: ?
+mcq: (multiple choice)
+q1, 1, 1 (presence of the choice)
+q1, 2, 1 
+text:
+q5, n/a, the actual question text
+slider:
+q6, 1, 2 (value of the slider for that particular choice)
+response_metadata (responseid, name, emailaddress, ipaddress, startdate, enddate )
+response (responseid, questionid, answerchoiceid, description)
+
+mysql> desc survey_meta;
++----------------------+-------------+------+-----+---------+-------+
+| Field                | Type        | Null | Key | Default | Extra |
++----------------------+-------------+------+-----+---------+-------+
+| SurveyId             | varchar(50) | YES  |     | NULL    |       |
+| SurveyCreationDate   | datetime    | YES  |     | NULL    |       |
+| UserFirstName        | varchar(50) | YES  |     | NULL    |       |
+| UserLastName         | varchar(50) | YES  |     | NULL    |       |
+| SurveyName           | varchar(50) | YES  |     | NULL    |       |
+| SurveyOwnerId        | varchar(50) | YES  |     | NULL    |       |
+| SurveyExpirationDate | datetime    | YES  |     | NULL    |       |
++----------------------+-------------+------+-----+---------+-------+
+7 rows in set (0.01 sec)
+
+mysql> desc response_metadata;
++--------------+-------------+------+-----+---------+-------+
+| Field        | Type        | Null | Key | Default | Extra |
++--------------+-------------+------+-----+---------+-------+
+| SurveyId     | varchar(50) | YES  |     | NULL    |       |
+| Name         | varchar(50) | YES  |     | NULL    |       |
+| EmailAddress | varchar(50) | YES  |     | NULL    |       |
+| IpAddress    | varchar(50) | YES  |     | NULL    |       |
+| StartDate    | datetime    | YES  |     | NULL    |       |
+| EndDate      | datetime    | YES  |     | NULL    |       |
++--------------+-------------+------+-----+---------+-------+
+6 rows in set (0.01 sec)
+
+mysql> desc question;
++---------------------+-------------+------+-----+---------+-------+
+| Field               | Type        | Null | Key | Default | Extra |
++---------------------+-------------+------+-----+---------+-------+
+| SurveyId            | varchar(50) | YES  |     | NULL    |       |
+| QuestionId          | varchar(30) | YES  |     | NULL    |       |
+| QuestionText        | varchar(50) | YES  |     | NULL    |       |
+| QuestionDescription | varchar(50) | YES  |     | NULL    |       |
+| ForceResponse       | varchar(50) | YES  |     | NULL    |       |
+| QuestionType        | varchar(50) | YES  |     | NULL    |       |
++---------------------+-------------+------+-----+---------+-------+
+6 rows in set (0.01 sec)
+
+mysql> desc Choice
+    -> ;
++-------------+-------------+------+-----+---------+-------+
+| Field       | Type        | Null | Key | Default | Extra |
++-------------+-------------+------+-----+---------+-------+
+| SurveyId    | varchar(50) | YES  |     | NULL    |       |
+| QuestionId  | varchar(50) | YES  |     | NULL    |       |
+| ChoiceId    | varchar(50) | YES  |     | NULL    |       |
+| Description | varchar(50) | YES  |     | NULL    |       |
++-------------+-------------+------+-----+---------+-------+
+4 rows in set (0.01 sec)
+
+mysql> desc response_metadata;
++--------------+-------------+------+-----+---------+-------+
+| Field        | Type        | Null | Key | Default | Extra |
++--------------+-------------+------+-----+---------+-------+
+| SurveyId     | varchar(50) | YES  |     | NULL    |       |
+| Name         | varchar(50) | YES  |     | NULL    |       |
+| EmailAddress | varchar(50) | YES  |     | NULL    |       |
+| IpAddress    | varchar(50) | YES  |     | NULL    |       |
+| StartDate    | datetime    | YES  |     | NULL    |       |
+| EndDate      | datetime    | YES  |     | NULL    |       |
++--------------+-------------+------+-----+---------+-------+
+------
+ext_id
+anon_id
+------
+6 rows in set (0.01 sec)
+
+mysql> desc response;
++----------------+-------------+------+-----+---------+-------+
+| Field          | Type        | Null | Key | Default | Extra |
++----------------+-------------+------+-----+---------+-------+
+| SurveyId       | varchar(50) | YES  |     | NULL    |       |
+| ResponseId     | varchar(50) | YES  |     | NULL    |       |
+| QuestionId     | varchar(50) | YES  |     | NULL    |       |
+| AnswerChoiceId | varchar(50) | YES  |     | NULL    |       |
+| Description    | varchar(50) | YES  |     | NULL    |       |
++----------------+-------------+------+-----+---------+-------+
+5 rows in set (0.01 sec)
+
+- Engine = MyIsam
+
+
+
