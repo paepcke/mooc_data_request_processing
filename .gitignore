@@ -64,3 +64,4 @@ src/qualtrics_etl/data/
 
 # Dev inspection script
 surveycheck.py
+.eggs

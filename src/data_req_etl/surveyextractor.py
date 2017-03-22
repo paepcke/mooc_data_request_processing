@@ -57,7 +57,9 @@ class QualtricsExtractor(MySQLDB):
 
         #****** Undo
         #*******MySQLDB.__init__(self, db="EdxQualtrics", user=dbuser, passwd=dbpass)
-        MySQLDB.__init__(self, port=3307, db="DataRequests", user=dbuser, passwd=dbpass)
+        #*******MySQLDB.__init__(self, port=3307, db="DataRequests", user=dbuser, passwd=dbpass)
+        #MySQLDB.__init__(self, port=3307, db="DataRequests", user=dbuser, passwd=dbpass)
+        MySQLDB.__init__(self, db="DataRequests", user=dbuser, passwd=dbpass)
         #******* End Undo
 
 ## Database setup helper methods for client
@@ -128,7 +130,7 @@ class QualtricsExtractor(MySQLDB):
                             """)
 
         respondentView = ("""
-                            CREATE OR REPLACE VIEW `RespondentMetadata` (
+                            CREATE OR REPLACE VIEW `RespondentMetadata` 
                                 (SurveyId, ResponseId, anon_screen_name, Country, StartDate, EndDate)
                             AS SELECT
                                 SurveyID AS SurveyId,
@@ -292,7 +294,7 @@ class QualtricsExtractor(MySQLDB):
 
 ## Transform methods
 
-    def __parseSurveyMetadata(self, rawMeta):
+    def __parseSurveyMetadata(self, rawMeta, the_survey_id=None):
         '''
         Given survey metadata for active user, returns a dict of dicts mapping
         column names to values for each survey. Skips over previously loaded surveys.
@@ -302,6 +304,8 @@ class QualtricsExtractor(MySQLDB):
             keys = ['SurveyID', 'SurveyName', 'SurveyCreationDate', 'UserFirstName', 'UserLastName', 'responses']
             data = dict()
             svID = sv['SurveyID']
+            if the_survey_id is not None and svID != the_survey_id:
+              continue
             if self.__isLoaded(svID):
                 continue
             for key in keys:
@@ -312,7 +316,7 @@ class QualtricsExtractor(MySQLDB):
                     data[k[0]] = 'NULL'  # Set value to NULL if no data found
             svMeta.append(data)  # Finally, add row to master dict
         return svMeta
-
+        
     def __parseSurvey(self, svID):
         '''
         Given surveyID, parses survey from Qualtrics and returns:
@@ -398,7 +402,10 @@ class QualtricsExtractor(MySQLDB):
 
         # Get total expected responses
         rq = 'SELECT `responses` FROM survey_meta WHERE SurveyID = "%s"' % svID
-        rnum = self.query(rq).next()
+        try:
+          rnum = self.query(rq).next()
+        except StopIteration:
+          return ({},{})
 
         logging.info(" Parsing %s responses from survey %s..." % (len(rsRaw['responses']), svID))
 
@@ -624,22 +631,24 @@ class QualtricsExtractor(MySQLDB):
 if __name__ == '__main__':
     qe = QualtricsExtractor()
     #************
-    sys.argv.extend([#'-a',
+    sys.argv.extend(['-a',
                      '-m', 
                      '-s', 
-                     '-r', 
-                     'i'])
+                     #'-r', 
+                     #'i'
+                     ])
     #************
     opts, args = getopt.getopt(sys.argv[1:], 'amsrti', ['--reset', '--loadmeta', '--loadsurveys', '--loadresponses', '--responsetest', '--buildindexes'])
     for opt, arg in opts:
         if opt in ('-a', '--reset'):
             qe.resetSurveys()
             qe.resetResponses()
+            qe.resetMetadata()
         elif opt in ('-m', '--loadmeta'):
             qe.loadSurveyMetadata()
         elif opt in ('-s', '--loadsurvey'):
             qe.resetSurveys()
-            qe.loadSurveyData()
+            qe.loadSurveyData(the_survey_id='SV_ahriYiMPjMnz56l')
         elif opt in ('-r', '--loadresponses'):
             #******qe.loadResponseData()
             qe.loadResponseData(the_survey_id='SV_ahriYiMPjMnz56l')
