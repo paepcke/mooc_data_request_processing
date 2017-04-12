@@ -1,4 +1,4 @@
-import multiprocessing
+
 from setuptools import setup, find_packages
 setup(
     name = "qualtrics_etl",
@@ -7,8 +7,9 @@ setup(
 
     # Dependencies on other packages:
     setup_requires   = ['nose>=1.1.2'],
-    install_requires = ['pymysql_utils>=0.49',
-			],
+    install_requires = ['mysql-connector==2.1.4',
+                        #'MySQL-python>=1.2.5',
+			           ],
     tests_require    = [],
 
     # Unit tests; they are initiated via 'python setup.py test'

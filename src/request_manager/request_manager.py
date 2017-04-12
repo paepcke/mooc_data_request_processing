@@ -3,13 +3,28 @@ Created on Feb 8, 2017
 
 @author: paepcke
 '''
+
+import os
+import sys
 import urllib2
+
+# from MySQLdb import Warning as db_warning
+# from MySQLdb import _mysql
+# from MySQLdb.cursors import DictCursor as DictCursor
+# from MySQLdb.cursors import SSCursor as SSCursor
+# from MySQLdb.cursors import SSDictCursor as SSDictCursor
+import mysql
+from mysql import connector
 from bs4 import BeautifulSoup
+
 
 class DataRequestManager(object):
     '''
     classdocs
     '''
+    # Particular survey to fetch:
+    TARGET_SURVEY   = 'SV_ahriYiMPjMnz56l'
+    
     fld_name_choice_id_dict = {
       "First Name" : 'Q_Choice1',
       "Last Name"  : 'Q_Choice2'
@@ -20,9 +35,32 @@ class DataRequestManager(object):
         '''
         Constructor
         '''
+        try:
+            HOME = os.getenv('HOME')
+            pwd_file = os.path.join(HOME, '.ssh/mysql')
+            with open(pwd_file, 'r') as file_handle:
+                self.pwd = file_handle.read().strip()
+        except Exception:
+            print('Cannot obtain MySQL password.')
+            sys.exit(1)
         
-    def get_request_survey(self):
-        pass
+        self.mysql_user = 'dataman'
+        self.get_request_survey(self.mysql_user, self.pwd)
+        
+        
+    def get_request_survey(self, mysql_user, mysql_pwd):
+        
+        #conn = _mysql.connect(host='localhost',
+        conn = connector.connect(host='localhost',
+                                 user=mysql_user, 
+                                 passwd=mysql_pwd,
+                                 db='DataRequests'
+                                 )
+
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute('SELECT * FROM survey_meta')
+        one_row_dict = cursor.fetchone()
+        print(one_row_dict)
     
     def get_req_info_from_admin(self):
         '''
@@ -57,7 +95,5 @@ class DataRequestManager(object):
         pass
     
 if __name__ == '__main__':
-  
-                                                                                                        data_manager = DataRequestManager()
-                                                                                                        #data_manager.save_qualtrics_info('https://proxy.qualtrics.com/proxy/?url=https%3A%2F%2Fstanforduniversity.qualtrics.com%2FCP%2FReport.php%3FSID%3DSV_ahriYiMPjMnz56l%26R%3DR_ToMk7CUJZFhCeYh&token=yDx4ygoyrTjiYkQFyAHhwiycw5TiIHXIS5orJyc1z2Q%3D')
-  
+    data_manager = DataRequestManager()
+    
