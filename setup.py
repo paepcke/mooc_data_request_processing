@@ -8,7 +8,7 @@ setup(
     # Dependencies on other packages:
     setup_requires   = ['nose>=1.1.2'],
     install_requires = ['mysql-connector==2.1.4',
-                        #'MySQL-python>=1.2.5',
+                        'MySQL-python>=1.2.5',
 			           ],
     tests_require    = [],
 

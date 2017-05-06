@@ -12,6 +12,7 @@ from collections import OrderedDict
 import getopt
 import time
 import logging
+import sets
 import datetime as dt
 from ipToCountry import IpCountryDict
 
@@ -22,14 +23,14 @@ class QualtricsExtractor(MySQLDB):
      
     # Database where survey tables are to be
     # created: 
-    TARGET_DATABASE = 'DataRequests'
-    #TARGET_DATABASE = 'EdxQualtrics'
+    DATA_REQUESTS_TARGET_DATABASE = 'DataRequests'
+    ALL_REQUESTS_TARGET_DATABASE  = 'EdxQualtrics'
     
     # Particular survey to fetch:
-    TARGET_SURVEY   = 'SV_ahriYiMPjMnz56l'
-    #TARGET_SURVEY   = None
+    DATA_REQUESTS_TARGET_SURVEY   = 'SV_ahriYiMPjMnz56l'
+    ALL_REQUESTS_TARGET_SURVEY   = None
 
-    def __init__(self):
+    def __init__(self, target_db=None, target_survey_id=None):
         '''
         Initializes extractor object with credentials from .ssh directory.
         Set log file directory.
@@ -44,7 +45,8 @@ class QualtricsExtractor(MySQLDB):
             sys.exit("Token file not found: " + tokenFile)
         if os.path.isfile(dbFile) == False:
             sys.exit("MySQL user credentials not found: " + dbFile)
-
+        
+        self.the_survey_id = target_survey_id
         self.apiuser = None
         self.apitoken = None
         dbuser = None
@@ -69,7 +71,7 @@ class QualtricsExtractor(MySQLDB):
         #*******MySQLDB.__init__(self, db="EdxQualtrics", user=dbuser, passwd=dbpass)
         #*******MySQLDB.__init__(self, port=3307, db="DataRequests", user=dbuser, passwd=dbpass)
         #MySQLDB.__init__(self, port=3307, db="DataRequests", user=dbuser, passwd=dbpass)
-        MySQLDB.__init__(self, db="DataRequests", user=dbuser, passwd=dbpass)
+        MySQLDB.__init__(self, db=target_db, user=dbuser, passwd=dbpass)
         #******* End Undo
 
 ## Database setup helper methods for client
@@ -129,6 +131,7 @@ class QualtricsExtractor(MySQLDB):
                               `Language` varchar(50) DEFAULT NULL,
                               `ExternalDataReference` varchar(200) DEFAULT NULL,
                               `a` varchar(200) DEFAULT NULL,
+                              `c` varchar(200) DEFAULT NULL,
                               `UID` varchar(200) DEFAULT NULL,
                               `userid` varchar(200) DEFAULT NULL,
                               `anon_screen_name` varchar(200) DEFAULT NULL,
@@ -263,18 +266,43 @@ class QualtricsExtractor(MySQLDB):
 
     def __assignCDN(self, survey, surveyID):
         '''
-        Given a survey from Qualtrics, finds embedded field 'c' and returns field value.
-        Field contains unique course identifier from platform, for mapping to course log data.
+        Given a Python-internalized XML structure from Qualtrics, 
+        finds the embedded field 'c' and return its field value.
+        That field contains the unique course identifier, which
+        ties the survey to course information in the tracking log data.
         '''
+        
         try:
-            cdn = None
-            embedded = survey.findall('./EmbeddedData/Field')
-            for ef in embedded:
-                if ef.find('Name').text == 'c':
-                    cdn = ef.find('Value').text
+            # The survey structure includes a substructure like:
+            #    <SurveyDefinition>
+            #        ...
+            #        <EmbeddedData>
+            #            <Field>
+            #                <Name><![CDATA[c]]></Name>
+            #                <Value><![CDATA[course-v1:Engineering+NuclearBrink+Fall2016]]></Value>
+            #            </Field>
+            # Need to find the 'c' sub-field, and the corresponding 'Value' subfield 
+            
+            c_fld_found = False
+            course_display_name = None
+            done = False
+            for embeddedDataEl in survey.findall('./EmbeddedData'):
+                if done:
+                    break
+                for fieldEl in embeddedDataEl:
+                    if done:
+                        break
+                    for fldChild in fieldEl.iter():
+                        if fldChild.tag == 'Name' and fldChild.text == 'c':
+                            c_fld_found = True
+                        else:
+                            if c_fld_found:
+                                course_display_name = fldChild.text
+                                done = True
+                                break
         except AttributeError as e:
             logging.warning("%s course identifier not resolved: %s" % (surveyID, e))
-        query = "UPDATE survey_meta SET course_display_name='%s' WHERE SurveyId='%s'" % (cdn, surveyID)
+        query = "UPDATE survey_meta SET course_display_name='%s' WHERE SurveyId='%s'" % (course_display_name, surveyID)
         self.execute(query.encode('UTF-8', 'ignore'))
 
     def __isLoaded(self, svID):
@@ -304,7 +332,7 @@ class QualtricsExtractor(MySQLDB):
 
 ## Transform methods
 
-    def __parseSurveyMetadata(self, rawMeta, the_survey_id=None):
+    def __parseSurveyMetadata(self, rawMeta):
         '''
         Given survey metadata for active user, returns a dict of dicts mapping
         column names to values for each survey. Skips over previously loaded surveys.
@@ -314,7 +342,7 @@ class QualtricsExtractor(MySQLDB):
             keys = ['SurveyID', 'SurveyName', 'SurveyCreationDate', 'UserFirstName', 'UserLastName', 'responses']
             data = dict()
             svID = sv['SurveyID']
-            if the_survey_id is not None and svID != the_survey_id:
+            if self.the_survey_id is not None and svID != self.the_survey_id:
                 continue
             if self.__isLoaded(svID):
                 continue
@@ -423,59 +451,68 @@ class QualtricsExtractor(MySQLDB):
         respMeta = []
         rsID = None
 
-        for rs in rsRaw['responses']:
-            rsID = rs.pop('ResponseID', 'NULL')
+        for resp_from_server in rsRaw['responses']:
             # Get response metadata for each response
             # Method destructively reads question fields
-            rm = dict()
-            rm['SurveyID'] = svID
-            rm['ResponseID'] = rsID
-            rm['Name'] = rs.pop('RecipientFirstName', 'NULL') + rs.pop('RecipientLastName', 'NULL')
-            rm['EmailAddress'] = rs.pop('RecipientEmail', 'NULL')
-            rm['IPAddress'] = rs.pop('IPAddress', 'NULL')
-            rm['StartDate'] = rs.pop('StartDate', 'NULL')
-            rm['EndDate'] = rs.pop('EndDate', 'NULL')
-            rm['ResponseSet'] = rs.pop('ResponseSet', 'NULL')
-            rm['Language'] = rs.pop('Q_Language', 'NULL')
-            rm['ExternalDataReference'] = rs.pop('ExternalDataReference', 'NULL')
-            rm['a'] = rs.pop('a', 'NULL')
-            rm['UID'] = rs.pop('uid', 'NULL')
-            rm['userid'] = rs.pop('user_id', 'NULL')  # NOTE: Not transformed, use unclear
-            if(len(rm['UID']) >= 40):
-                rm['anon_screen_name'] = rm['UID']
-            elif (len(rm['a']) >= 32):
-                rm['anon_screen_name'] = self.__getAnonUserID(rm['a'])
-            if (len(rm['IPAddress']) in range(8, 16)):
-                rm['Country'] = self.lookup.lookupIP(rm['IPAddress'])[1]
-            elif (len(rm['UID']) in range(8, 16)):
-                rm['Country'] = self.lookup.lookupIP(rm['UID'])[1]
-            rm['advance'] = rs.pop('advance', 'NULL')
-            rm['Finished'] = rs.pop('Finished', 'NULL')
-            rm['Status'] = rs.pop('Status', 'NULL')
-            del rs['LocationLatitude']
-            del rs['LocationLongitude']
-            respMeta.append(rm)
+            resp_meta = dict()
+            resp_meta['SurveyID'] = svID
+            resp_meta['ResponseID'] = resp_from_server['ResponseID']
+            last_name  = resp_from_server['RecipientLastName'] if 'RecipientLastName' in resp_from_server else 'NULL'
+            first_name = resp_from_server['RecipientFirstName'] if 'RecipientFirstName' in resp_from_server else 'NULL'
+            resp_meta['Name'] = '%s %s' % (first_name, last_name)
+            resp_meta['EmailAddress'] = resp_from_server['EmailAddress'] if 'EmailAddress' in resp_from_server else 'NULL'         
+            resp_meta['IPAddress'] = resp_from_server['IPAddress'] if 'IPAddress' in resp_from_server else 'NULL'
+            resp_meta['Country'] = resp_from_server['ip_country_name'] if 'ip_country_name' in resp_from_server else 'NULL'
+            resp_meta['StartDate'] = resp_from_server['StartDate'] if 'StartDate' in resp_from_server else 'NULL'
+            resp_meta['EndDate'] = resp_from_server['EndDate'] if 'EndDate' in resp_from_server else 'NULL'
+            resp_meta['ResponseSet'] = resp_from_server['ResponseSet'] if 'ResponseSet' in resp_from_server else 'NULL'
+            resp_meta['Language'] = resp_from_server['Q_Language'] if 'Q_Language' in resp_from_server else 'NULL'
+            resp_meta['ExternalDataReference'] = resp_from_server['ExternalDataReference'] if 'ExternalDataReference' in resp_from_server else 'NULL'
+            resp_meta['a'] = resp_from_server['a'] if 'a' in resp_from_server else 'NULL'
+            resp_meta['c'] = resp_from_server['c'] if 'c' in resp_from_server else 'NULL'
+            resp_meta['UID'] = resp_from_server['UID'] if 'UID' in resp_from_server else 'NULL'
+            resp_meta['userid'] = resp_from_server['user_id'] if 'user_id' in resp_from_server else 'NULL'
+            resp_meta['advance'] = resp_from_server['advance'] if 'advance' in resp_from_server else 'NULL'
+            resp_meta['Finished'] = resp_from_server['Finished'] if 'Finished' in resp_from_server else 'NULL'
+            resp_meta['Status'] = resp_from_server['Status'] if 'Status' in resp_from_server else 'NULL'
+
+            del resp_from_server['LocationLatitude']
+            del resp_from_server['LocationLongitude']
+            respMeta.append(resp_meta)
+
+            collected_keys = sets.Set(resp_meta.keys())
+            all_keys = sets.Set(resp_from_server.keys())
+            question_keys = all_keys - collected_keys
 
             # Parse remaining fields as question answers
-            fields = rs.keys()
-            for q in fields:
+            for question_key in question_keys:
                 qs = dict()
-                if 'Q' and '_' in q:
-                    qSplit = q.rsplit('_', 1)
-                    qNum = qSplit[0]
-                    cID = qSplit[1]
-                else:
-                    qNum = q
-                    cID = 'NULL'
                 qs['SurveyID'] = svID
-                qs['ResponseID'] = rsID
-                qs['QuestionNumber'] = qNum
-                qs['AnswerChoiceID'] = cID
-                desc = rs[q].replace('"', '').replace("'", "").replace('\\', '').lstrip('u')
-                if len(desc) >= 5000:
-                    desc = desc[:5000]  # trim past max field length
-                qs['Description'] = desc
+                qs['ResponseID'] = resp_from_server['ResponseID']
+                qs['QuestionNumber'] = question_key
+                qs['AnswerChoiceID'] = resp_from_server[question_key]
                 responses.append(qs)
+
+#             # Parse remaining fields as question answers
+#             fields = resp_from_server.keys()
+#             for q in fields:
+#                 qs = dict()
+#                 if 'Q' and '_' in q:
+#                     qSplit = q.rsplit('_', 1)
+#                     qNum = qSplit[0]
+#                     cID = qSplit[1]
+#                 else:
+#                     qNum = q
+#                     cID = 'NULL'
+#                 qs['SurveyID'] = svID
+#                 qs['ResponseID'] = resp_from_server['ResponseID']
+#                 qs['QuestionNumber'] = qNum
+#                 qs['AnswerChoiceID'] = cID
+#                 desc = resp_from_server[q].replace('"', '').replace("'", "").replace('\\', '').lstrip('u')
+#                 if len(desc) >= 5000:
+#                     desc = desc[:5000]  # trim past max field length
+#                 qs['Description'] = desc
+#                 responses.append(qs)
 
         return responses, respMeta
 
@@ -488,7 +525,9 @@ class QualtricsExtractor(MySQLDB):
         represented as a list of dicts mapping column names to values.
         '''
         try:
-            columns = tuple(data[5].keys())
+            # Obtain column nmaes from the 
+            # first of the survey JSON structures:
+            columns = tuple(data[0].keys())
             table = []
             # logging.info("     " + ", ".join(columns))
             for row in data:
@@ -577,14 +616,14 @@ class QualtricsExtractor(MySQLDB):
         if len(parsedSM) > 0:
             self.__loadDB(parsedSM, 'survey_meta')
 
-    def loadSurveyData(self, the_survey_id=None):
+    def loadSurveyData(self):
         '''
         Client method extracts and transforms survey questions and question
         choices and loads to MySQL database using MySQLDB class methods.
         '''
         
-        if the_survey_id is not None:
-            sids = [the_survey_id]
+        if self.the_survey_id is not None:
+            sids = [self.the_survey_id]
         else:
             sids = self.__genSurveyIDs(forceLoad=True)
 
@@ -595,14 +634,17 @@ class QualtricsExtractor(MySQLDB):
             self.__loadDB(questions.values(), 'question')
             self.__loadDB(choices.values(), 'choice')
 
-    def loadResponseData(self, the_survey_id=None, startAfter=0):
+    def loadResponseData(self, startAfter=0):
         '''
         Client method extracts and transforms response data and response metadata
         and loads to MySQL database using MySQLDB class methods. User can specify
         where to start in the list of surveyIDs.
         '''
-        if the_survey_id is not None:
-            sids = [the_survey_id]
+        # If we are loading all surveys, rather than
+        # just survey that records data requests,
+        # get all survey IDs;
+        if self.the_survey_id is not None:
+            sids = [self.the_survey_id]
         else:
             sids = self.__genSurveyIDs()
         for idx, svID in enumerate(sids):
@@ -619,16 +661,30 @@ class QualtricsExtractor(MySQLDB):
             self.__loadDB(respMeta, 'response_metadata')
 
 if __name__ == '__main__':
-    qe = QualtricsExtractor()
     #************
-    sys.argv.extend(['-a',
-                     '-m', 
-                     '-s', 
-                     '-r', 
-                     '-i'
+    sys.argv.extend([
+                     #'-a',
+                     #'-m', 
+                     #'-s', 
+                     #'-r', 
+                     #'-i'
                      ])
     #************
-    opts, args = getopt.getopt(sys.argv[1:], 'amsrti', ['--reset', '--loadmeta', '--loadsurveys', '--loadresponses', '--responsetest', '--buildindexes'])
+    opts, args = getopt.getopt(sys.argv[1:], 'amsrtid', 
+                               ['reset', 
+                                'loadmeta', 
+                                'loadsurveys', 
+                                'loadresponses', 
+                                'responsetest', 
+                                'buildindexes',
+                                'datarequests'])
+    if ('--datarequests','') in opts:
+        qe = QualtricsExtractor(QualtricsExtractor.DATA_REQUESTS_TARGET_DATABASE,
+                                QualtricsExtractor.DATA_REQUESTS_TARGET_SURVEY)
+    else:
+        qe = QualtricsExtractor(QualtricsExtractor.ALL_REQUESTS_TARGET_DATABASE,
+                                QualtricsExtractor.ALL_REQUESTS_TARGET_SURVEY)
+        
     for opt, arg in opts:
         if opt in ('-a', '--reset'):
             qe.resetSurveys()
@@ -636,11 +692,18 @@ if __name__ == '__main__':
             qe.resetMetadata()
         elif opt in ('-m', '--loadmeta'):
             qe.loadSurveyMetadata()
+        elif opt in ('-d', '--datarequests'):
+            qe.resetSurveys()
+            qe.resetResponses()
+            qe.resetMetadata()
+            qe.loadSurveyMetadata()
+            qe.loadSurveyData()
+            qe.loadResponseData()
         elif opt in ('-s', '--loadsurvey'):
             qe.resetSurveys()
-            qe.loadSurveyData(the_survey_id=QualtricsExtractor.TARGET_SURVEY)
+            qe.loadSurveyData()
         elif opt in ('-r', '--loadresponses'):
-            qe.loadResponseData(the_survey_id=QualtricsExtractor.TARGET_SURVEY)
+            qe.loadResponseData()
         elif opt in ('-t', '--responsetest'):
             qe.resetMetadata()
             qe.loadSurveyMetadata()
