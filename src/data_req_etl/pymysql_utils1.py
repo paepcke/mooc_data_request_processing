@@ -10,11 +10,10 @@ Modifications:
 '''
 
 import csv
-import re
 import subprocess
-import sys
 import tempfile
 import MySQLdb
+
 #import pymysql
 
 
