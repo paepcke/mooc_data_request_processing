@@ -14,10 +14,12 @@ import subprocess
 import tempfile
 import MySQLdb
 
-#import pymysql
+from collections import OrderedDict
+from contextlib import contextmanager
+from MySQLdb import Warning as db_warning
 
+from warnings import filterwarnings, resetwarnings
 
-#import MySQLdb
 class MySQLDB(object):
     '''
     Shallow interface to MySQL databases. Some niceties nonetheless.
@@ -182,10 +184,18 @@ class MySQLDB(object):
             mySQLCmd = ("USE %s; LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY ',' " +\
                         "OPTIONALLY ENCLOSED BY '\"' ESCAPED BY '' LINES TERMINATED BY '\\n' %s" +\
                         ";commit;") %  (self.db, tmpCSVFile.name, tblName, colSpec)
-            if len(self.pwd) > 0:
-                subprocess.call(['mysql', '--local_infile=1', '-u', self.user, '-p%s'%self.pwd, '-e', mySQLCmd])
-            else:
-                subprocess.call(['mysql', '--local_infile=1', '-u', self.user, '-e', mySQLCmd])
+
+            # In this special version: hardcode dataman as user so as
+            # to suppress the 'Using a password on the command line..."
+            # warning. It seems not to go away even with warnings turned
+            # off:
+
+            subprocess.call(['mysql', '--login-path=dataman', '--local_infile=1', '-e', mySQLCmd])
+
+            # if len(self.pwd) > 0:
+            #     subprocess.call(['mysql', '--local_infile=1', '-u', self.user, '-p%s'%self.pwd, '-e', mySQLCmd])
+            # else:
+            #     subprocess.call(['mysql', '--local_infile=1', '-u', self.user, '-e', mySQLCmd])
         finally:
             tmpCSVFile.close()
 
@@ -303,3 +313,35 @@ class MySQLDB(object):
                 yield(str(element))
             except UnicodeEncodeError:
                 yield element.encode('UTF-8','ignore')
+
+# ----------------------- Context Managers -------------------------    
+
+# Ability to write:
+#    with no_warn_no_table():
+#       ... DROP TABLE IF NOT EXISTS ...
+# without annoying Python-level warnings that the
+# table did not exist:
+
+@contextmanager
+def no_warn_no_table():
+    filterwarnings('ignore', message="Unknown table", category=db_warning)
+    yield
+    resetwarnings()
+
+@contextmanager
+def no_warn_dup_key():
+    filterwarnings('ignore', message="Duplicate entry", category=db_warning)
+    yield
+    resetwarnings()
+
+@contextmanager
+def no_db_warnings():
+    filterwarnings('ignore', category=db_warning)
+    yield
+    resetwarnings()
+
+@contextmanager
+def no_pwd_warnings():
+    filterwarnings('ignore', message="Using a password on the command line interface can be insecure.",category=db_warning)
+    yield
+    resetwarnings()
