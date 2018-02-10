@@ -7,7 +7,10 @@ import os.path
 import sys
 import xml.etree.ElementTree as ET
 from xml.etree.ElementTree import ParseError
+
 from pymysql_utils1 import MySQLDB
+from pymysql_utils1 import no_pwd_warnings
+
 from string import Template
 import zipfile as z
 import StringIO as sio
@@ -67,13 +70,22 @@ class QualtricsExtractor(MySQLDB):
             dbuser = f.readline().rstrip()
             dbpass = f.readline().rstrip()
 
-        logging.basicConfig(filename="DataRequestsETL_%d%d%d_%d%d.log" %\
-                            (dt.datetime.today().year, 
-                             dt.datetime.today().month, 
-                             dt.datetime.today().day, 
-                             dt.datetime.now().hour, 
-                             dt.datetime.now().minute),
-                             level=logging.INFO)
+        # The commented version of the call to setupLogging()
+        # writes to a nicely named file in the CWD. But this
+        # class is usually used by CRON, which redirects
+        # output into a file in ~/cronlog:
+
+        self.logger = self.setupLogging()
+
+        # self.setupLogging(loggingLevel=logging.INFO,
+        #                   logFile="DataRequestsETL_%d%d%d_%d%d.log" %\
+        #                     (dt.datetime.today().year, 
+        #                      dt.datetime.today().month, 
+        #                      dt.datetime.today().day, 
+        #                      dt.datetime.now().hour, 
+        #                      dt.datetime.now().minute)
+        #                   )
+
 
         self.lookup = IpCountryDict()
 
@@ -206,23 +218,23 @@ class QualtricsExtractor(MySQLDB):
         data = self.__getSurveyMetadata()
         surveys = data['Result']['Surveys']
         total = len(surveys)
-        logging.info("Extracting %d surveys from Qualtrics..." % total)
+        self.logger.info("Extracting %d surveys from Qualtrics..." % total)
 
         for idx, sv in enumerate(surveys):
             svID = sv['SurveyID']
-            logging.info("Processing survey %d out of %d total: %s" % (idx + 1, total, svID))
+            self.logger.info("Finding ID for survey %d out of %d total: %s" % (idx + 1, total, svID))
             if forceLoad:
                 yield svID
                 continue
 
             payload = int(sv.pop('responses', 0))
-            logging.info(" Found %d responses." % payload)
+            self.logger.debug("Found %d responses." % payload)
             existing = (self.__numResponses(svID) or 0)
-            logging.info(" Have %d responses already." % existing)
+            self.logger.debug("Have %d responses already." % existing)
             if (existing < payload) or forceLoad:
                 yield svID
             else:
-                logging.info("  Survey %s yielded no new data." % svID)
+                self.logger.debug("Survey %s yielded no new data." % svID)
                 continue
 
     def __getSurvey(self, surveyID):
@@ -244,6 +256,8 @@ class QualtricsExtractor(MySQLDB):
         JSON objects containing batches of 5000 surveys.
         '''
 
+        self.logger.info("Getting responses for survey %s" % surveyID)
+
         urlTemp = Template("https://dc-viawest.qualtrics.com:443/API/v1/surveys/${svid}/responseExports?apiToken=${tk}&fileType=JSON")
         reqURL = urlTemp.substitute(svid=surveyID, tk=self.apitoken)
         req = json.loads(urllib2.urlopen(reqURL).read())
@@ -251,29 +265,43 @@ class QualtricsExtractor(MySQLDB):
         statURL = req['result']['exportStatus'] + "?apiToken=" + self.apitoken
         percent, tries = 0, 0
         while percent != 100 and tries < 20:
-            time.sleep(5)  # Wait 5 seconds between attempts to acquire data
+            if tries > 0:
+                time.sleep(5)  # Wait 5 seconds between attempts to acquire data
             try:
                 stat = json.loads(urllib2.urlopen(statURL).read())
                 percent = stat['result']['percentComplete']
             except:
-                logging.warning(" Recovered from HTTP error.")
+                self.logger.warning(" Recovered from HTTP error.")
                 continue
             finally:
                 tries += 1
         if tries >= 20:
-            logging.error("  Survey %s timed out." % surveyID)
+            self.logger.error("  Survey %s timed out." % surveyID)
             return None
 
-        dataURL = stat['result']['file']
-        remote = urllib2.urlopen(dataURL).read()
+        dataURL = stat['result']['fileUrl']
+
+        # HTTP Header must include the apitoken:
+
+        req     = urllib2.Request(dataURL)
+        req.add_header("content-type", "application/json")
+        req.add_header("x-api-token", self.apitoken)
+
+        try:
+            remote  = urllib2.urlopen(req).read()
+        except Exception as e:
+            self.logger.error("Error talking to Qualtrics server (quitting): %s" % `e`)
+            sys.exit()
         dataZip = sio.StringIO(remote)
         archive = z.ZipFile(dataZip, 'r')
         dataFile = archive.namelist()[0]
         data = json.loads(archive.read(dataFile), object_pairs_hook=OrderedDict)
 
         if not data['responses']:
+            self.logger.info("No reponses found for survey %s" % surveyID)
             return None
         else:
+            self.logger.info("Done retrieving reponses for survey %s" % surveyID)
             return data
 
 
@@ -316,7 +344,7 @@ class QualtricsExtractor(MySQLDB):
                                 done = True
                                 break
         except AttributeError as e:
-            logging.warning("%s course identifier not resolved: %s" % (surveyID, e))
+            self.logger.warning("%s course identifier not resolved: %s" % (surveyID, e))
         query = "UPDATE survey_meta SET course_display_name='%s' WHERE SurveyId='%s'" % (course_display_name, surveyID)
         self.execute(query.encode('UTF-8', 'ignore'))
 
@@ -357,8 +385,16 @@ class QualtricsExtractor(MySQLDB):
             keys = ['SurveyID', 'SurveyName', 'SurveyCreationDate', 'UserFirstName', 'UserLastName', 'responses']
             data = dict()
             svID = sv['SurveyID']
+
+            # If original call to loadSurveyMetadata() specified
+            # to get only a specific survey id: check whether we
+            # reached that ID; if not, keep searching:
+
             if self.the_survey_id is not None and svID != self.the_survey_id:
                 continue
+
+            # If this survey was loaded earlier,
+            # skip it:
             if self.__isLoaded(svID):
                 continue
             for key in keys:
@@ -382,10 +418,10 @@ class QualtricsExtractor(MySQLDB):
         try:
             sv = self.__getSurvey(svID)
         except urllib2.HTTPError:
-            logging.warning("Survey %s not found." % svID)
+            self.logger.warning("Survey %s not found." % svID)
             return None, None
         except ParseError as e:
-            logging.error("Survey %s could not be parsed: %s" % (svID, `e`))
+            self.logger.error("Survey %s could not be parsed: %s" % (svID, `e`))
             return None, None
 
         masterQ = dict()
@@ -445,7 +481,7 @@ class QualtricsExtractor(MySQLDB):
                 rsRaw = self.__getResponses(svID)
                 break
             except urllib2.HTTPError as e:
-                logging.error("  Survey %s gave error '%s'." % (svID, e))
+                self.logger.error("  Survey %s gave error '%s'." % (svID, e))
                 if e.getcode() == '400':
                     continue
                 else:
@@ -453,17 +489,19 @@ class QualtricsExtractor(MySQLDB):
 
         # Return if API gave us no data
         if rsRaw is None:
-            logging.info("  Survey %s gave no responses." % svID)
+            self.logger.info("  Survey %s gave no responses." % svID)
             return None, None
 
         # Get total expected responses
         rq = 'SELECT `responses` FROM survey_meta WHERE SurveyID = "%s"' % svID
         try:
             rnum = self.query(rq).next() #@UnusedVariable
+            self.logger.info("Expecting %s responses for survey %s" % (rnum,svID))
         except StopIteration:
+            self.logger.warning("Could not find number of responses for survey %s" % svID)
             return ({},{})
 
-        logging.info(" Parsing %s responses from survey %s..." % (len(rsRaw['responses']), svID))
+        self.logger.info(" Parsing %s responses from survey %s..." % (len(rsRaw['responses']), svID))
 
         responses = []
         respMeta = []
@@ -546,14 +584,16 @@ class QualtricsExtractor(MySQLDB):
             # first of the survey JSON structures:
             columns = tuple(data[0].keys())
             table = []
-            # logging.info("     " + ", ".join(columns))
+            # self.logger.info("     " + ", ".join(columns))
             for row in data:
                 vals = tuple(row.values())
-                # logging.info("     " + ", ".join(vals))
+                # self.logger.info("     " + ", ".join(vals))
                 table.append(vals)
-            self.bulkInsert(tableName, columns, table)
+            if len(table) > 0:
+                with no_pwd_warnings():
+                    self.bulkInsert(tableName, columns, table)
         except Exception as e:
-            logging.error("  Insert query failed: %s" % e)
+            self.logger.error("  Insert query failed: %s" % e)
 
 
 ## Build indexes.
@@ -651,7 +691,7 @@ class QualtricsExtractor(MySQLDB):
                 continue
             self.__loadDB(questions.values(), 'question')
             self.__loadDB(choices.values(), 'choice')
-        logging.info("Encountered %s non-parsable XML responses from Qualtrics: " % self.num_parse_errors)
+        self.logger.info("Encountered %s non-parsable XML responses from Qualtrics: " % self.num_parse_errors)
 
     def loadResponseData(self, startAfter=0):
         '''
@@ -662,22 +702,63 @@ class QualtricsExtractor(MySQLDB):
         # If we are loading all surveys, rather than
         # just survey that records data requests,
         # get all survey IDs;
-        if self.the_survey_id is not None:
-            sids = [self.the_survey_id]
+
+        suspended_indexing = False
+
+        try:
+            if self.the_survey_id is not None:
+                sids = [self.the_survey_id]
+            else:
+                sids = self.__genSurveyIDs()
+                self.execute("ALTER TABLE response DISABLE KEYS")
+                suspended_indexing = True
+            for idx, svID in enumerate(sids):
+                if idx < startAfter:
+                    self.logger.info("  Skipped surveyID %s" % svID)
+                    continue  # skip first n surveys
+                responses, respMeta = self.__parseResponses(svID)
+                retrieved = len(respMeta) if respMeta is not None else 0
+                self.logger.info(" Inserting %d responses on survey %s to database." % (retrieved, svID))
+                self.execute("UPDATE survey_meta SET responses_actual='%d' WHERE SurveyID='%s'" % (retrieved, svID))
+                if (responses is None) or (respMeta is None):
+                    continue
+                self.__loadDB(responses, 'response')
+                self.__loadDB(respMeta, 'response_metadata')
+        finally:
+            if suspended_indexing:
+                self.execute("ALTER TABLE response ENABLE KEYS")
+
+    def setupLogging(self, loggingLevel=logging.INFO, logFile=None):
+        '''
+        Set up the standard Python logger.
+
+        @param loggingLevel: desired logging level threshold
+        @type loggingLevel: {logging.CRITICAL |
+                             logging.ERROR    |
+                             logging.WARNING  |
+                             logging.INFO     |
+                             logging.DEBUG    |
+                             logging.NOTSET}
+        @param logFile: file to which logging output is replicated
+        @type logFile: sting
+        @returns logger
+        '''
+
+        # Create a logger with name 'survey_pull':
+        logger = logging.getLogger('survey_pull')
+
+        # Create file handler if requested:
+        if logFile is not None:
+            handler = logging.FileHandler(logFile)
+            print('Logging will be archived in %s' % logFile)
         else:
-            sids = self.__genSurveyIDs()
-        for idx, svID in enumerate(sids):
-            if idx < startAfter:
-                logging.info("  Skipped surveyID %s" % svID)
-                continue  # skip first n surveys
-            responses, respMeta = self.__parseResponses(svID)
-            retrieved = len(respMeta) if respMeta is not None else 0
-            logging.info(" Inserting %d responses on survey %s to database." % (retrieved, svID))
-            self.execute("UPDATE survey_meta SET responses_actual='%d' WHERE SurveyID='%s'" % (retrieved, svID))
-            if (responses is None) or (respMeta is None):
-                continue
-            self.__loadDB(responses, 'response')
-            self.__loadDB(respMeta, 'response_metadata')
+            handler = logging.StreamHandler()
+
+        logger.setLevel(loggingLevel)
+        formatter = logging.Formatter("%(name)s: %(asctime)s;%(levelname)s: %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        return logger
 
 if __name__ == '__main__':
     #************
@@ -711,86 +792,86 @@ if __name__ == '__main__':
     for opt, arg in opts:
         if opt in ('-a', '--reset'):
 
-            logging.info("Resetting surveys...")
+            qe.logger.info("Resetting surveys...")
             qe.resetSurveys()
-            logging.info("Done resetting surveys.")
+            qe.logger.info("Done resetting surveys.")
 
-            logging.info("Resetting responses...")
+            qe.logger.info("Resetting responses...")
             qe.resetResponses()
-            logging.info("Done resetting responses.")
+            qe.logger.info("Done resetting responses.")
 
-            logging.info("Resetting survey metadata...")
+            qe.logger.info("Resetting survey metadata...")
             qe.resetMetadata()
-            logging.info("Done resetting survey metadata.")
+            qe.logger.info("Done resetting survey metadata.")
 
         elif opt in ('-m', '--loadmeta'):
 
-            logging.info("Loading survey metadata...")
+            qe.logger.info("Loading survey metadata...")
             qe.loadSurveyMetadata()
-            logging.info("Done loading survey metadata.")
+            qe.logger.info("Done loading survey metadata.")
 
         elif opt in ('-d', '--datarequests'):
 
-            logging.info("Resetting surveys...")
+            qe.logger.info("Resetting surveys...")
             qe.resetSurveys()
-            logging.info("Done resetting surveys.")
+            qe.logger.info("Done resetting surveys.")
 
-            logging.info("Resetting responses...")
+            qe.logger.info("Resetting responses...")
             qe.resetResponses()
-            logging.info("Done resetting responses.")
+            qe.logger.info("Done resetting responses.")
 
-            logging.info("Resetting metadata...")
+            qe.logger.info("Resetting metadata...")
             qe.resetMetadata()
-            logging.info("Done resetting metadata.")
+            qe.logger.info("Done resetting metadata.")
 
-            logging.info("Loading survey metadata...")
+            qe.logger.info("Loading survey metadata...")
             qe.loadSurveyMetadata()
-            logging.info("Done loading survey metadata.")
+            qe.logger.info("Done loading survey metadata.")
 
-            logging.info("Loading survey data...")
+            qe.logger.info("Loading survey data...")
             qe.loadSurveyData()
-            logging.info("Done loading survey data.")
+            qe.logger.info("Done loading survey data.")
 
-            logging.info("Loading response data...")
+            qe.logger.info("Loading response data...")
             qe.loadResponseData()
-            logging.info("Done loading response data.")
+            qe.logger.info("Done loading response data.")
 
         elif opt in ('-s', '--loadsurvey'):
 
-            logging.info("Resetting surveys...")
+            qe.logger.info("Resetting surveys...")
             qe.resetSurveys()
-            logging.info("Done resetting surveys.")
+            qe.logger.info("Done resetting surveys.")
 
-            logging.info("Loading survey data...")
+            qe.logger.info("Loading survey data...")
             qe.loadSurveyData()
-            logging.info("Done loading survey data.")
+            qe.logger.info("Done loading survey data.")
 
         elif opt in ('-r', '--loadresponses'):
 
-            logging.info("Loading response data...")
+            qe.logger.info("Loading response data...")
             qe.loadResponseData()
-            logging.info("Done loading response data.")
+            qe.logger.info("Done loading response data.")
 
         elif opt in ('-t', '--responsetest'):
 
-            logging.info("Resetting metadata...")
+            qe.logger.info("Resetting metadata...")
             qe.resetMetadata()
-            logging.info("Done resetting metadata.")
+            qe.logger.info("Done resetting metadata.")
 
-            logging.info("Loading survey metadata...")
+            qe.logger.info("Loading survey metadata...")
             qe.loadSurveyMetadata()
-            logging.info("Done loading survey metadata.")
+            qe.logger.info("Done loading survey metadata.")
 
-            logging.info("Resetting responses...")
+            qe.logger.info("Resetting responses...")
             qe.resetResponses()
-            logging.info("Done resetting responses.")
+            qe.logger.info("Done resetting responses.")
 
-            logging.info("Loading response data...")
+            qe.logger.info("Loading response data...")
             qe.loadResponseData()
-            logging.info("Done loading response data.")
+            qe.logger.info("Done loading response data.")
 
         elif opt in ('-i', '--buildindexes'):
 
-            logging.info("Building indexess...")
+            qe.logger.info("Building indexess...")
             qe.buildIndexes()
-            logging.info("Done building indexess.")
+            qe.logger.info("Done building indexess.")
